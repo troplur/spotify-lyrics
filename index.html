@@ -98,6 +98,8 @@ const lyricsWrap = document.getElementById('lyricsWrap');
 const statusEl = document.getElementById('status');
 const clientIdInput = document.getElementById('clientId');
 
+// Hardcoded client ID
+localStorage.setItem(CLIENT_ID_KEY, 'cee2a044cd0d4540bbd58943751679ec');
 const savedClientId = localStorage.getItem(CLIENT_ID_KEY);
 if (savedClientId) clientIdInput.value = savedClientId;
 
@@ -224,6 +226,15 @@ if(authError){
 } else {
   init();
 }
+
+// Auto-login if no token stored
+async function autoLogin() {
+  const token = await getValidToken();
+  if (!token) {
+    document.getElementById('loginBtn').click();
+  }
+}
+autoLogin();
 
 let currentTrackId = null;
 let lyricsData = null;
