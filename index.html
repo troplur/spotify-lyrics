@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Now Playing — Lyrics</title>
+<style>
+  :root{
+    --bg:#0d0c0e;
+    --panel:#161418;
+    --accent:#1ed760;
+    --text:#f5f3f0;
+    --muted:#8a8690;
+    --line-dim: rgba(245,243,240,0.35);
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    font-family:'Helvetica Neue', Arial, sans-serif;
+    background: radial-gradient(circle at 50% 0%, #1a1820 0%, var(--bg) 60%);
+    color:var(--text);
+    min-height:100vh;
+    display:flex; flex-direction:column; align-items:center;
+    padding:32px 16px 80px;
+  }
+  h1{font-size:14px; letter-spacing:0.2em; text-transform:uppercase; color:var(--muted); margin-bottom:24px; font-weight:600;}
+  .login{
+    background:var(--accent); color:#000; border:none; padding:14px 32px;
+    border-radius:999px; font-weight:700; font-size:15px; cursor:pointer;
+    letter-spacing:0.02em;
+  }
+  .login:hover{transform:scale(1.03);}
+  .card{
+    width:100%; max-width:480px; background:var(--panel);
+    border-radius:18px; padding:24px; display:flex; gap:16px; align-items:center;
+    box-shadow:0 8px 40px rgba(0,0,0,0.5);
+  }
+  .card img{width:72px; height:72px; border-radius:8px; object-fit:cover;}
+  .meta{overflow:hidden;}
+  .meta .title{font-size:18px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .meta .artist{font-size:14px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px;}
+
+  .lyrics-wrap{
+    width:100%; max-width:480px; margin-top:32px;
+    height:50vh; overflow-y:auto; mask-image: linear-gradient(to bottom, black 0%, black 92%, transparent);
+    scrollbar-width:none;
+  }
+  .lyrics-wrap::-webkit-scrollbar{display:none;}
+  .line{
+    font-size:22px; font-weight:700; line-height:1.6; color:var(--line-dim);
+    padding:6px 8px; transition: color .25s ease;
+    white-space: normal;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+  .line.active{color:var(--text);}
+  
+  .status{color:var(--muted); font-size:14px; margin-top:24px; text-align:center;}
+  .config{
+    width:100%; max-width:480px; background:var(--panel); border-radius:18px;
+    padding:20px; margin-bottom:20px; font-size:13px; color:var(--muted);
+  }
+  .config input{
+    width:100%; background:#0d0c0e; border:1px solid #2a282e; color:var(--text);
+    padding:10px; border-radius:8px; margin:8px 0; font-size:13px;
+  }
+  .config label{display:block; margin-top:10px; font-weight:600; color:var(--text);}
+</style>
+</head>
+<body>
+<h1>Now Playing · Lyrics</h1>
+
+<div id="setup" class="config">
+  <label>Spotify Client ID</label>
+  <input id="clientId" placeholder="from your Spotify Developer Dashboard app">
+  <p style="margin-top:8px;">Redirect URI must be set in your Spotify app to exactly this page's URL.</p>
+  <button class="login" id="loginBtn" style="margin-top:12px;">Connect Spotify</button>
+</div>
+
+<div id="player" class="card" style="display:none;">
+  <img id="cover" src="" alt="">
+  <div class="meta">
+    <div class="title" id="trackName">—</div>
+    <div class="artist" id="artistName">—</div>
+  </div>
+</div>
+
+<div id="lyricsWrap" class="lyrics-wrap" style="display:none;"></div>
+<div id="status" class="status"></div>
+
+<script>
+const CLIENT_ID_KEY = 'spotify_client_id';
+const TOKEN_KEY = 'spotify_access_token';
+const VERIFIER_KEY = 'spotify_verifier';
+
+const setupEl = document.getElementById('setup');
+const playerEl = document.getElementById('player');
+const lyricsWrap = document.getElementById('lyricsWrap');
+const statusEl = document.getElementById('status');
+const clientIdInput = document.getElementById('clientId');
+
+const savedClientId = localStorage.getItem(CLIENT_ID_KEY);
+if (savedClientId) clientIdInput.value = savedClientId;
+
+function base64url(buffer){
+  return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+async function sha256(plain){
+  const data = new TextEncoder().encode(plain);
+  return await crypto.subtle.digest('SHA-256', data);
+}
+function randomString(len=64){
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return base64url(arr).slice(0,len);
+}
+
+document.getElementById('loginBtn').addEventListener('click', async () => {
+  const clientId = clientIdInput.value.trim();
+  if(!clientId){ alert('Enter your Spotify Client ID'); return; }
+  localStorage.setItem(CLIENT_ID_KEY, clientId);
+
+  const verifier = randomString(64);
+  localStorage.setItem(VERIFIER_KEY, verifier);
+  const challenge = base64url(await sha256(verifier));
+
+  const redirectUri = 'http://127.0.0.1:3000';
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    scope: 'user-read-currently-playing user-read-playback-state',
+    code_challenge_method: 'S256',
+    code_challenge: challenge
+  });
+  window.location.href = 'https://accounts.spotify.com/authorize?' + params.toString();
+});
+
+async function exchangeCodeForToken(code){
+  const clientId = localStorage.getItem(CLIENT_ID_KEY);
+  const verifier = localStorage.getItem(VERIFIER_KEY);
+  const redirectUri = 'http://127.0.0.1:3000';
+
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: redirectUri,
+    client_id: clientId,
+    code_verifier: verifier
+  });
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body
+  });
+  const data = await res.json();
+  if(data.access_token){
+    localStorage.setItem(TOKEN_KEY, JSON.stringify({
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: Date.now() + (data.expires_in*1000)
+    }));
+  }
+  return data;
+}
+
+async function refreshToken(){
+  const stored = JSON.parse(localStorage.getItem(TOKEN_KEY) || '{}');
+  const clientId = localStorage.getItem(CLIENT_ID_KEY);
+  if(!stored.refresh_token) return null;
+  const body = new URLSearchParams({
+    grant_type:'refresh_token',
+    refresh_token: stored.refresh_token,
+    client_id: clientId
+  });
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body
+  });
+  const data = await res.json();
+  if(data.access_token){
+    stored.access_token = data.access_token;
+    stored.expires_at = Date.now() + (data.expires_in*1000);
+    if(data.refresh_token) stored.refresh_token = data.refresh_token;
+    localStorage.setItem(TOKEN_KEY, JSON.stringify(stored));
+    return stored.access_token;
+  }
+  return null;
+}
+
+async function getValidToken(){
+  let stored = JSON.parse(localStorage.getItem(TOKEN_KEY) || '{}');
+  if(!stored.access_token) return null;
+  if(Date.now() > stored.expires_at - 30000){
+    return await refreshToken();
+  }
+  return stored.access_token;
+}
+
+const urlParams = new URLSearchParams(window.location.search);
+const code = urlParams.get('code');
+const authError = urlParams.get('error');
+if(authError){
+  statusEl.textContent = 'Spotify auth error: ' + authError;
+  setupEl.style.display = 'block';
+} else if(code){
+  statusEl.textContent = 'Connecting...';
+  exchangeCodeForToken(code).then((data)=>{
+    if(data && data.access_token){
+      window.history.replaceState({}, document.title, window.location.pathname);
+      init();
+    } else {
+      const msg = data.error_description || data.error || JSON.stringify(data);
+      statusEl.textContent = 'Auth failed: ' + msg;
+      statusEl.style.color = '#ff6b6b';
+      setupEl.style.display = 'block';
+    }
+  }).catch(e=>{
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.style.color = '#ff6b6b';
+    setupEl.style.display = 'block';
+  });
+} else {
+  init();
+}
+
+let currentTrackId = null;
+let lyricsData = null;
+let compiledLines = []; 
+let lastProgressMs = 0;
+let lastProgressAt = 0;
+let isPlaying = false;
+
+function getCurrentProgress(){
+  if(!isPlaying) return lastProgressMs;
+  return lastProgressMs + (Date.now() - lastProgressAt);
+}
+
+setInterval(()=>{
+  if(lyricsData && lyricsData.synced && isPlaying){
+    highlightLine(getCurrentProgress());
+  }
+}, 100);
+
+async function init(){
+  const token = await getValidToken();
+  if(!token){
+    setupEl.style.display = 'block';
+    return;
+  }
+  setupEl.style.display = 'none';
+  playerEl.style.display = 'flex';
+  lyricsWrap.style.display = 'block';
+  pollNowPlaying();
+  setInterval(pollNowPlaying, 1000);
+}
+
+async function pollNowPlaying(){
+  const token = await getValidToken();
+  if(!token){ setupEl.style.display='block'; playerEl.style.display='none'; lyricsWrap.style.display='none'; return; }
+
+  const res = await fetch('https://api.spotify.com/v1/me/player/currently-playing', {
+    headers:{Authorization:'Bearer '+token}
+  });
+  if(res.status === 204){
+    statusEl.textContent = 'Nothing playing right now';
+    return;
+  }
+  if(!res.ok){
+    statusEl.textContent = 'Spotify API error: '+res.status;
+    return;
+  }
+  const data = await res.json();
+  if(!data || !data.item) return;
+
+  const item = data.item;
+  document.getElementById('trackName').textContent = item.name;
+  document.getElementById('artistName').textContent = item.artists.map(a=>a.name).join(', ');
+  document.getElementById('cover').src = item.album.images[0]?.url || '';
+  statusEl.textContent = '';
+
+  lastProgressMs = data.progress_ms;
+  lastProgressAt = Date.now();
+  isPlaying = data.is_playing;
+
+  if(item.id !== currentTrackId){
+    currentTrackId = item.id;
+    // Don't await — fire lyrics fetch immediately in parallel
+    loadLyrics(item.artists[0].name, item.name);
+  }
+}
+
+async function loadLyrics(artist, title){
+  lyricsWrap.innerHTML = '<div class="line active">Loading lyrics…</div>';
+  lyricsData = null;
+  compiledLines = [];
+  try{
+    const url = `https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(title)}`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('not found');
+    const data = await res.json();
+
+    if(data.syncedLyrics){
+      const lines = data.syncedLyrics.split('\n').map(l=>{
+        const m = l.match(/\[(\d+):(\d+(?:\.\d+)?)\](.*)/);
+        if(!m) return null;
+        const time = (parseInt(m[1])*60 + parseFloat(m[2])) * 1000;
+        return {time, text: m[3].trim() || '♪'};
+      }).filter(Boolean);
+      lyricsData = {synced: lines};
+      renderSyncedLyrics(lines);
+    } else if(data.plainLyrics){
+      lyricsData = {plain: data.plainLyrics};
+      renderPlainLyrics(data.plainLyrics);
+    } else {
+      throw new Error('no lyrics');
+    }
+  }catch(e){
+    lyricsWrap.innerHTML = '<div class="line active">No lyrics found for this track</div>';
+  }
+}
+
+/*
+  Sentence Lengthening Algorithm with Hook Detection:
+  Combines text into longer thoughts EXCEPT when a line is an 
+  identical duplicate/hook phrase of its neighbor, enforcing a new line break.
+*/
+function renderSyncedLyrics(lines) {
+  let html = '';
+  compiledLines = [];
+  
+  let currentGroup = [];
+  let currentWordCount = 0;
+  const maxWords = 14; 
+
+  for (let i = 0; i < lines.length; i++) {
+    const currentLine = lines[i];
+    const cleanText = currentLine.text.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"").trim();
+    const wordCount = currentLine.text.split(' ').length;
+    
+    let isTimeGap = false;
+    let isRepeatedPhrase = false;
+
+    if (i > 0) {
+      const prevLine = lines[i - 1];
+      const prevCleanText = prevLine.text.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"").trim();
+      
+      // Hook Check: Is this phrase identical to the last one?
+      if (cleanText === prevCleanText && cleanText !== '♪' && cleanText !== '') {
+        isRepeatedPhrase = true;
+      }
+      
+      // Timing Gap Check
+      if (currentLine.time - prevLine.time > 4500) {
+        isTimeGap = true;
+      }
+    }
+
+    if (i < lines.length - 1) {
+      const nextLine = lines[i + 1];
+      const nextCleanText = nextLine.text.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"").trim();
+      
+      // If the upcoming line matches this line, break early so it doesn't get pulled into the current block
+      if (cleanText === nextCleanText && cleanText !== '♪' && cleanText !== '') {
+        isRepeatedPhrase = true;
+      }
+    }
+
+    // Force compilation if word limit hit, time gap detected, or a repeated phrase rule flags it
+    if ((currentWordCount + wordCount > maxWords || isTimeGap || isRepeatedPhrase) && currentGroup.length > 0) {
+      compiledLines.push({
+        startTime: currentGroup[0].time,
+        endTime: currentLine.time,
+        text: currentGroup.map(g => g.text).join(' ')
+      });
+      currentGroup = [];
+      currentWordCount = 0;
+    }
+
+    currentGroup.push(currentLine);
+    currentWordCount += wordCount;
+
+    // If it's a repeated line, immediately ship it out alone to prevent following lines from joining it
+    if (isRepeatedPhrase && currentGroup.length > 0) {
+      compiledLines.push({
+        startTime: currentGroup[0].time,
+        endTime: (lines[i + 1] ? lines[i + 1].time : Infinity),
+        text: currentGroup.map(g => g.text).join(' ')
+      });
+      currentGroup = [];
+      currentWordCount = 0;
+    }
+  }
+
+  if (currentGroup.length > 0) {
+    compiledLines.push({
+      startTime: currentGroup[0].time,
+      endTime: Infinity,
+      text: currentGroup.map(g => g.text).join(' ')
+    });
+  }
+
+  compiledLines.forEach((item, idx) => {
+    const formatted = splitOnUnexpectedCaps(item.text);
+    html += `<div class="line" data-idx="${idx}">${escapeHtml(formatted).replace(/\n/g,"<br>")}</div>`;
+  });
+
+  lyricsWrap.innerHTML = html;
+}
+
+function renderPlainLyrics(text) {
+  let html = '';
+  let currentLineText = [];
+  let currentWordCount = 0;
+  const maxWords = 14;
+  
+  const rawLines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const currentLine = rawLines[i];
+    const cleanText = currentLine.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"").trim();
+    const words = currentLine.split(' ');
+    
+    let isRepeatedPhrase = false;
+    if (i > 0) {
+      const prevClean = rawLines[i - 1].toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"").trim();
+      if (cleanText === prevClean) isRepeatedPhrase = true;
+    }
+    if (i < rawLines.length - 1) {
+      const nextClean = rawLines[i + 1].toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"").trim();
+      if (cleanText === nextClean) isRepeatedPhrase = true;
+    }
+
+    if ((currentWordCount + words.length > maxWords || isRepeatedPhrase) && currentLineText.length > 0) {
+      html += `<div class="line">${escapeHtml(currentLineText.join(' '))}</div>`;
+      currentLineText = [];
+      currentWordCount = 0;
+    }
+
+    currentLineText.push(currentLine);
+    currentWordCount += words.length;
+
+    if (isRepeatedPhrase) {
+      html += `<div class="line">${escapeHtml(currentLineText.join(' '))}</div>`;
+      currentLineText = [];
+      currentWordCount = 0;
+    }
+  }
+
+  if (currentLineText.length > 0) {
+    html += `<div class="line">${escapeHtml(currentLineText.join(' '))}</div>`;
+  }
+  
+  lyricsWrap.innerHTML = html;
+}
+
+
+function splitOnUnexpectedCaps(text) {
+  // Words that should never trigger a new line before them
+  // Words that never trigger a line break
+  const safeWords = new Set([
+    'St','Dr','Mr','Mrs','Ms','Jr','Sr','Mt','Ft','Lt','Sgt','Prof','Rev','Gov','Mc',
+    'I','A','An','The','And','But','Or','So','Yet','For','Nor',
+    'In','On','At','To','By','Of','Up','As','If','Is','It','My','We',
+    'He','She','They','You','Your','Our','His','Her','Its',
+    'Oh','Ah','No','Yes','Now','Just','Like','With','From','Into',
+    'That','This','When','Then','There','Here','All','Too','Got','Get',
+    'Can','Do','Did','Was','Are','Has','Had','Have','Will','Been','Be',
+    'Let','Say','See','One','Two','Some','What','Who','How','Why','Where'
+  ]);
+
+  // Adlib words — treated as inline, never trigger or prevent a break
+  const adlibWords = new Set([
+    'Ayy','Ay','Aye','Ayyy','Ayyyy','Aight','Ight','Mmm','Mhm','Uh','Uhh','Uhhh',
+    'Skrrt','Skrt','Woo','Woah','Whoa','Brr','Brrr','Grr','Huh','Hm','Hmm'
+  ]);
+
+  // Proper noun words — only these continue a name chain (no break after them)
+  // Everything else, including common words, resets the chain
+  const properNounish = (w) => {
+    const clean = w.replace(/[^a-zA-Z]/g, '');
+    return /^[A-Z]/.test(w) && !safeWords.has(clean) && !adlibWords.has(clean) && !/^[A-Z]{2,}$/.test(w);
+  };
+
+  const words = text.split(' ');
+  const result = [];
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const prev = words[i - 1] || '';
+    const clean = word.replace(/[^a-zA-Z]/g, '');
+
+    const startsWithCap = /^[A-Z]/.test(word);
+    const isFirst = i === 0;
+    const prevEndsSentence = /[.!?]$/.test(prev);
+    const prevIsAbbrev = /^(St|Dr|Mr|Mrs|Ms|Jr|Sr|Mt|Ft|Lt|Sgt|Prof|Rev|Gov)\.$/.test(prev);
+    const isSafeWord = safeWords.has(clean);
+    const isAdlib = adlibWords.has(clean);
+    const isAcronym = /^[A-Z]{2,}$/.test(word);
+    const prevIsLower = /^[a-z]/.test(prev);
+    // Only suppress break if prev was a true proper noun (e.g. "Laurie" before "Lynn")
+    const prevIsProperNoun = properNounish(prev);
+
+    const shouldBreak = !isFirst && !isAdlib && startsWithCap &&
+      !prevEndsSentence && !prevIsAbbrev && !isSafeWord &&
+      !isAcronym && !prevIsLower && !prevIsProperNoun;
+
+    result.push(shouldBreak ? ('\n' + word) : word);
+  }
+
+  return result.join(' ').replace(/ \n /g, '\n');
+}
+
+function escapeHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+let lastActive = -1;
+function highlightLine(progressMs){
+  if (!compiledLines || compiledLines.length === 0) return;
+  
+  let activeIdx = 0;
+  for (let i = 0; i < compiledLines.length; i++) {
+    if (compiledLines[i].startTime <= progressMs + 150) {
+      activeIdx = i;
+    } else {
+      break;
+    }
+  }
+  
+  if (activeIdx === lastActive) return;
+  lastActive = activeIdx;
+  
+  const currentLines = document.querySelectorAll('.line');
+  currentLines.forEach(el => el.classList.remove('active'));
+  
+  const el = lyricsWrap.querySelector(`[data-idx="${activeIdx}"]`);
+  if (el) {
+    el.classList.add('active');
+    el.scrollIntoView({behavior:'smooth', block:'center'});
+  }
+}
+</script>
+</body>
+</html>
