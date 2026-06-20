@@ -92,6 +92,29 @@ const CLIENT_ID_KEY = 'spotify_client_id';
 const TOKEN_KEY = 'spotify_access_token';
 const VERIFIER_KEY = 'spotify_verifier';
 
+// Cookie-based storage for browsers that clear localStorage (e.g. Tesla)
+function setCookie(name, value, days=365) {
+  const expires = new Date(Date.now() + days*864e5).toUTCString();
+  document.cookie = name + '=' + encodeURIComponent(value) + '; expires=' + expires + '; path=/; SameSite=Lax';
+}
+function getCookie(name) {
+  return document.cookie.split('; ').reduce((r, v) => {
+    const parts = v.split('=');
+    return parts[0] === name ? decodeURIComponent(parts[1]) : r;
+  }, null);
+}
+function deleteCookie(name) {
+  document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+}
+
+// Override localStorage to also sync with cookies
+const _lsSet = localStorage.setItem.bind(localStorage);
+const _lsGet = localStorage.getItem.bind(localStorage);
+const _lsRemove = localStorage.removeItem.bind(localStorage);
+localStorage.setItem = (k, v) => { _lsSet(k, v); setCookie(k, v); };
+localStorage.getItem = (k) => { const v = _lsGet(k); if (v) return v; const c = getCookie(k); if (c) { _lsSet(k, c); } return c; };
+localStorage.removeItem = (k) => { _lsRemove(k); deleteCookie(k); };
+
 const setupEl = document.getElementById('setup');
 const playerEl = document.getElementById('player');
 const lyricsWrap = document.getElementById('lyricsWrap');
